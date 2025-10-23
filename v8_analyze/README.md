@@ -26,6 +26,7 @@ Maglev 是 V8 的中层优化编译器，位于 Sparkplug 和 TurboFan 之间。
 - **`maglev_control_flow.md`** - Maglev 控制流图（CFG）构建和处理机制
 - **`maglev_deopt.md`** - Maglev 反优化（Deoptimization）机制详解
 - **`maglev_number.md`** - Maglev 数值类型处理和优化
+- **`maglev_compilation_timing.md`** - Maglev 编译时间统计和性能分析
 
 ---
 
@@ -36,10 +37,9 @@ FrameState 是 V8 编译器中用于支持反优化的关键数据结构，记�
 ### 文档列表
 
 - **`framestate.md`** - FrameState 完整分析文档（主文档，103KB）
-- **`framestate_advanced.md`** - FrameState 高级主题分析
-- **`framestate_advanced_corrected.md`** - FrameState 高级主题分析（修订版）
-- **`framestate_cfg_mechanism.md`** - FrameState 在控制流图中的机制
 - **`framestate_construction.md`** - FrameState 构建过程详解
+- **`framestate_cfg_mechanism.md`** - FrameState 在控制流图中的机制
+- **`framestate_advanced.md`** - FrameState 高级主题和最佳实践
 - **`interpreter_frame_data_structure.md`** - 解释器帧数据结构分析
 
 ### 推荐阅读顺序
@@ -47,11 +47,38 @@ FrameState 是 V8 编译器中用于支持反优化的关键数据结构，记�
 1. `framestate.md` - 从主文档开始
 2. `framestate_construction.md` - 理解构建过程
 3. `framestate_cfg_mechanism.md` - 理解在 CFG 中的应用
-4. `framestate_advanced_corrected.md` - 深入高级主题
+4. `framestate_advanced.md` - 深入高级主题
 
 ---
 
-## 3. 测试用例和工具 (`test-cases/`)
+## 3. 调试和性能分析 (根目录)
+
+V8 调试和性能分析工具的完整指南。
+
+### 文档列表
+
+- **`debug_and_profiling_capabilities.md`** - V8 调试和调优能力完整文档
+  - Verify 验证能力
+  - Log 日志系统
+  - 编译耗时统计
+  - 100+ Trace 功能
+
+### 快速参考
+
+```bash
+# 查看优化统计
+out/x64.release/d8 --trace-opt-stats script.js
+
+# Maglev 编译统计
+out/x64.release/d8 --maglev-stats script.js
+
+# 详细的运行时统计
+out/x64.release/d8 --runtime-call-stats script.js
+```
+
+---
+
+## 4. 测试用例和工具 (`test-cases/`)
 
 包含用于验证和演示 V8 编译器行为的测试脚本。
 
@@ -63,6 +90,14 @@ FrameState 是 V8 编译器中用于支持反优化的关键数据结构，记�
 - **`test_alternative_nodes.js`** - 可选节点机制测试
 - **`test-foldbranch.js`** - 分支折叠优化测试
 - **`test-foldbranch-trace.js`** - 分支折叠优化追踪测试
+
+### Maglev 统计演示
+
+- **`maglev-stats-demo.js`** - 触发 Maglev 编译的演示脚本
+- **`run_maglev_stats.sh`** - 交互式统计工具（11种场景）
+- **`MAGLEV_QUICK_START.md`** - 3分钟快速上手
+- **`MAGLEV_STATS_USAGE.md`** - 完整使用教程
+- **`EXAMPLE_OUTPUT.md`** - 实际输出示例
 
 ### 工具脚本
 
@@ -80,11 +115,14 @@ out/x64.debug/d8 --allow-natives-syntax --trace-opt --trace-deopt v8_analyze/tes
 
 # 查看优化状态
 out/x64.debug/d8 --allow-natives-syntax v8_analyze/test-cases/test_status.js
+
+# Maglev 编译统计（推荐）
+./v8_analyze/test-cases/run_maglev_stats.sh
 ```
 
 ---
 
-## 4. 专题分析 (`misc/`)
+## 5. 专题分析 (`misc/`)
 
 其他重要的 V8 机制分析文档。
 
@@ -171,11 +209,19 @@ out/x64.debug/d8 --allow-natives-syntax v8_analyze/test-cases/test_status.js
 
 ## 更新日志
 
+- 2025-10-22: 文档整理和更新
+  - 新增 `debug_and_profiling_capabilities.md` (V8调试调优完整指南)
+  - 新增 Maglev 编译统计演示系统 (test-cases/)
+  - 移动 `maglev_compilation_timing.md` 到 maglev/ 目录
+  - 删除重复文件 framestate_advanced_corrected.md
+  - 更新所有 README 文档
+
 - 2025-10-21: 初始创建，整理现有分析文档
   - Maglev 相关文档：5 篇
-  - FrameState 相关文档：6 篇
-  - 测试用例：7 个
+  - FrameState 相关文档：5 篇 (已合并重复项)
+  - 测试用例和演示：12+ 个
   - 其他专题分析：6 篇
+  - 调试文档：1 篇 (新增)
 
 ---
 

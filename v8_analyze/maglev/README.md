@@ -11,6 +11,7 @@ Maglev 是 V8 的中层优化编译器（Mid-tier Optimizing Compiler），在�
 | `maglev_control_flow.md` | 控制流图构建详解 | 中高级 |
 | `maglev_deopt.md` | 反优化机制分析 | 中高级 |
 | `maglev_number.md` | 数值类型处理 | 中级 |
+| `maglev_compilation_timing.md` | 编译时间统计详解 | 性能分析 |
 
 ## Maglev 简介
 

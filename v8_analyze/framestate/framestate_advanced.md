@@ -1,230 +1,25 @@
-# FrameState 深度解析：生命周期、复用与 GC 安全性
+# FrameState 高级主题（更正版）
 
 ## 目录
-
-1. [FrameState 的三个层次](#1-framestate-的三个层次)
-2. [DeoptFrame 的创建时机与复用](#2-deoptframe-的创建时机与复用)
-3. [DeoptInfo 与寄存器分配](#3-deoptinfo-与寄存器分配)
-4. [Deoptimization 与 GC 的关系](#4-deoptimization-与-gc-的关系)
-5. [完整示例：从字节码到 Deopt](#5-完整示例从字节码到-deopt)
-
----
-
-## 1. FrameState 的三个层次
-
-### 1.1 回答：FrameState 是每个字节码一个吗？
-
-**❌ 不是每个字节码一个！** 让我们理清三个概念：
-
-#### InterpreterFrameState - 唯一的工作状态
-
-```cpp
-// src/maglev/maglev-graph-builder.h:1992
-class MaglevGraphBuilder {
- private:
-  InterpreterFrameState current_interpreter_frame_;  // ← 唯一实例！
-};
-```
-
-**特点：**
-- **唯一性**：整个编译过程只有一个 `current_interpreter_frame_`
-- **可变性**：每处理一条字节码就更新它
-- **不是快照**：只是编译器的"工作内存"
-
-**生命周期：**
-```
-构造 MaglevGraphBuilder
-    ↓
-current_interpreter_frame_ 初始化
-    ↓
-for each bytecode:
-    current_interpreter_frame_.get(reg)      // 读取
-    current_interpreter_frame_.set(reg, val)  // 更新
-    ↓
-BuildGraph() 完成
-```
-
-#### DeoptFrame - 按需创建的快照
-
-```cpp
-// src/maglev/maglev-graph-builder.h:1976
-class MaglevGraphBuilder {
- private:
-  DeoptFrame* latest_checkpointed_frame_ = nullptr;  // ← 缓存当前快照
-};
-```
-
-**创建时机：**
-```cpp
-// src/maglev/maglev-graph-builder.cc:1535
-DeoptFrame* MaglevGraphBuilder::GetLatestCheckpointedFrame() {
-  if (!latest_checkpointed_frame_) {  // ← 检查缓存
-    // 创建快照
-    latest_checkpointed_frame_ = zone()->New<InterpretedDeoptFrame>(
-        *compilation_unit_,
-        zone()->New<CompactInterpreterFrameState>(
-            *compilation_unit_, GetInLiveness(), current_interpreter_frame_),
-        // ↑ 从 current_interpreter_frame_ 快照
-        GetClosure(),
-        current_interpreter_frame_.virtual_objects().head(),
-        BytecodeOffset(iterator_.current_offset()),
-        GetCurrentSourcePosition(),
-        GetCallerDeoptFrame());
-  }
-  return latest_checkpointed_frame_;  // ← 返回缓存
-}
-```
-
-**特点：**
-- **懒创建**：只在需要 deopt 支持的节点处创建
-- **可复用**：同一字节码偏移的多个节点共享同一个 DeoptFrame
-- **不可变**：一旦创建，内容不变
-
-#### MergePointInterpreterFrameState - 控制流汇合点
-
-```cpp
-// src/maglev/maglev-interpreter-frame-state.h:291
-class MergePointInterpreterFrameState {
- private:
-  CompactInterpreterFrameState frame_state_;  // ← 包含紧凑帧状态
-  Phi::List phis_;                            // ← Phi 节点
-  BasicBlock** predecessors_;                 // ← 前驱列表
-};
-```
-
-**特点：**
-- **只在合并点**：if-else 汇合、循环头、异常处理器
-- **包含 CompactInterpreterFrameState**：不是替代关系
-- **管理 Phi 节点**：合并不同路径的值
-
-### 1.2 三者关系图
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│ MaglevGraphBuilder                                           │
-│                                                               │
-│ ┌────────────────────────────────────────────────────────┐   │
-│ │ InterpreterFrameState current_interpreter_frame_       │   │
-│ │ ┌────────────────────────────────────────────────────┐ │   │
-│ │ │ RegisterFrameArray frame_                          │ │   │
-│ │ │ [param0, param1, ..., r0, r1, ..., acc]           │ │   │
-│ │ │ 每条字节码都更新这个数组                             │ │   │
-│ │ └────────────────────────────────────────────────────┘ │   │
-│ │ KnownNodeAspects* known_node_aspects_                  │   │
-│ └────────────────────────────────────────────────────────┘   │
-│                                                               │
-│ DeoptFrame* latest_checkpointed_frame_  ← 缓存的快照         │
-│        │                                                      │
-│        ↓ 创建时机                                             │
-│ ┌────────────────────────────────────────────────────────┐   │
-│ │ 当节点需要 deopt 支持时：                               │   │
-│ │   CheckedSmiUntag                                       │   │
-│ │   Int32AddWithOverflow                                  │   │
-│ │   LoadField (可能触发 deopt)                            │   │
-│ │   ...                                                   │   │
-│ └────────────────────────────────────────────────────────┘   │
-└──────────────────────────────────────────────────────────────┘
-
-┌──────────────────────────────────────────────────────────────┐
-│ MergePointInterpreterFrameState (控制流汇合点)               │
-│                                                               │
-│ CompactInterpreterFrameState frame_state_                    │
-│ ┌────────────────────────────────────────────────────────┐   │
-│ │ ValueNode** live_registers_and_accumulator_            │   │
-│ │ [param0, param1, r0, acc]  ← 只存储活跃的               │   │
-│ └────────────────────────────────────────────────────────┘   │
-│                                                               │
-│ Phi::List phis_  ← 合并点创建的 Phi 节点                     │
-│ BasicBlock** predecessors_  ← 前驱块列表                     │
-│ KnownNodeAspects* known_node_aspects_  ← 合并后的优化信息    │
-└──────────────────────────────────────────────────────────────┘
-```
+1. [Deopt Use 机制详解](#1-deopt-use-机制详解)
+2. [DeoptInfo 复用：同一字节码偏移的多个节点](#2-deoptinfo-复用同一字节码偏移的多个节点)
+3. [示例错误更正](#3-示例错误更正)
+4. [GC 安全机制（真实源代码）](#4-gc-安全机制真实源代码)
+5. [完整示例（更正版）](#5-完整示例更正版)
 
 ---
 
-## 2. DeoptFrame 的创建时机与复用
+## 1. Deopt Use 机制详解
 
-### 2.1 创建时机
-
-#### 何时创建 DeoptFrame？
-
-只在以下情况创建：
-
-1. **Eager Deopt 节点**（立即反优化）
-   ```cpp
-   CheckedSmiUntag(value)  // 检查是否为 Smi，不是则立即 deopt
-   CheckMaps(object, maps) // 检查对象 Map，不匹配则 deopt
-   CheckedFloat64Unbox(value)  // 检查是否为 HeapNumber
-   ```
-
-2. **Lazy Deopt 节点**（延迟反优化）
-   ```cpp
-   CallRuntime(...)  // 调用可能触发 deopt 的 runtime 函数
-   CallBuiltin(...)  // 调用 builtin
-   LoadField(...) with feedback  // 带反馈的属性加载
-   ```
-
-3. **Checkpoint 节点**（检查点）
-   ```cpp
-   FunctionEntryStackCheck  // 函数入口栈检查
-   ```
-
-#### 实际代码位置
-
-```cpp
-// src/maglev/maglev-graph-builder.cc:1535-1563
-DeoptFrame* MaglevGraphBuilder::GetLatestCheckpointedFrame() {
-  if (in_prologue_) {
-    return GetDeoptFrameForEntryStackCheck();  // Prologue 特殊处理
-  }
-
-  if (!latest_checkpointed_frame_) {  // ← 缓存检查
-    // === 第一步：快照虚拟对象 ===
-    current_interpreter_frame_.virtual_objects().Snapshot();
-
-    // === 第二步：创建 DeoptFrame ===
-    latest_checkpointed_frame_ = zone()->New<InterpretedDeoptFrame>(
-        *compilation_unit_,
-        // 创建紧凑的帧状态快照
-        zone()->New<CompactInterpreterFrameState>(
-            *compilation_unit_,
-            GetInLiveness(),
-            current_interpreter_frame_),  // ← 从当前状态快照
-        GetClosure(),
-        current_interpreter_frame_.virtual_objects().head(),
-        BytecodeOffset(iterator_.current_offset()),  // ← 字节码偏移
-        GetCurrentSourcePosition(),
-        GetCallerDeoptFrame());
-
-    // === 第三步：标记所有值为 deopt use ===
-    latest_checkpointed_frame_->as_interpreted().frame_state()->ForEachValue(
-        *compilation_unit_,
-        [&](ValueNode* node, interpreter::Register) {
-          AddDeoptUse(node);  // ← 防止节点被 DCE 删除
-        });
-
-    // === 第四步：处理 EagerDeoptFrameScope（如果存在）===
-    const EagerDeoptFrameScope* deopt_scope = current_eager_deopt_scope_;
-    if (deopt_scope != nullptr) {
-      // 包装 builtin continuation frame
-      latest_checkpointed_frame_ = zone()->New<DeoptFrame>(
-          deopt_scope->data(),
-          RecursivelyWrapDeoptFrameWithContinuations(...));
-    }
-  }
-  return latest_checkpointed_frame_;  // ← 返回缓存或新创建的
-}
-```
-
-### 2.2 Deopt Use 机制详解
-
-#### 什么是 Deopt Use？
+### 1.1 什么是 Deopt Use？
 
 **Deopt Use** 是一种引用计数机制，用于防止 Dead Code Elimination (DCE) 过早删除 DeoptFrame 中引用的节点。
 
+### 1.2 核心实现
+
 #### use_count_ 追踪
 
-**源代码位置：** `src/maglev/maglev-ir.h:2872-2884, 3027`
+**源代码位置：** `src/maglev/maglev-ir.h:2872-2884`
 
 ```cpp
 class ValueNode : public Node {
@@ -266,6 +61,7 @@ void MaglevGraphBuilder::AddDeoptUse(ValueNode* node) {
         current_interpreter_frame_.virtual_objects().FindAllocatedWith(alloc);
     if (vobject) {
       AddDeoptUse(vobject);
+      // Add an escaping use for the allocation.
       AddNonEscapingUses(alloc, 1);
     }
     alloc->add_use();  // ← 增加引用计数
@@ -275,7 +71,40 @@ void MaglevGraphBuilder::AddDeoptUse(ValueNode* node) {
 }
 ```
 
-#### DCE 如何检查 use_count？
+#### 何时调用 AddDeoptUse？
+
+**源代码位置：** `src/maglev/maglev-graph-builder.cc:1549-1552`
+
+```cpp
+DeoptFrame* MaglevGraphBuilder::GetLatestCheckpointedFrame() {
+  // ... 省略前面的代码 ...
+
+  if (!latest_checkpointed_frame_) {
+    // 创建 DeoptFrame
+    latest_checkpointed_frame_ = zone()->New<InterpretedDeoptFrame>(
+        *compilation_unit_,
+        zone()->New<CompactInterpreterFrameState>(
+            *compilation_unit_, GetInLiveness(), current_interpreter_frame_),
+        GetClosure(),
+        current_interpreter_frame_.virtual_objects().head(),
+        BytecodeOffset(iterator_.current_offset()),
+        GetCurrentSourcePosition(),
+        GetCallerDeoptFrame());
+
+    // ← 关键！遍历帧状态中的所有值，增加 deopt use 计数
+    latest_checkpointed_frame_->as_interpreted().frame_state()->ForEachValue(
+        *compilation_unit_,
+        [&](ValueNode* node, interpreter::Register) {
+          AddDeoptUse(node);  // ← 调用 AddDeoptUse
+        });
+    AddDeoptUse(latest_checkpointed_frame_->as_interpreted().closure());
+  }
+
+  return latest_checkpointed_frame_;
+}
+```
+
+### 1.3 DCE 如何检查 use_count？
 
 **源代码位置：** `src/maglev/maglev-post-hoc-optimizations-processors.h:527-529`
 
@@ -298,9 +127,9 @@ class DeadNodeSweepingProcessor {
 
 **执行时机：** Post-hoc optimization 阶段，在寄存器分配之前。
 
-#### 为什么需要 AddDeoptUse？
+### 1.4 回答子问题
 
-**问题：** 如果节点被 DCE 删除，DeoptFrame 引用会消失吗？
+#### 问题 1.1：如果节点被 DCE 删除，DeoptFrame 引用会消失吗？
 
 **答案：❌ 不会！**
 
@@ -326,7 +155,7 @@ DCE 检查：
   }
 ```
 
-#### 为什么不连 DeoptFrame 一起删？
+#### 问题 1.2：为什么不连 DeoptFrame 一起删？
 
 **答案：DeoptFrame 是反优化的关键数据，不能删除！**
 
@@ -338,23 +167,53 @@ DCE 检查：
    - **节点**：编译时的 IR，可能被优化掉
    - **DeoptFrame**：运行时的救生索，必须保留到代码生成阶段
 
-### 2.3 复用机制
+**类比：**
+```
+节点          → 高速公路的车道
+DeoptFrame    → 紧急停车带
 
-#### 何时复用 DeoptFrame？
+即使某条车道不用了（DCE），紧急停车带也必须保留（运行时可能需要）
+```
 
-**场景：同一字节码偏移的多个节点**
+### 1.5 完整流程图
+
+```
+创建需要 deopt 的节点（如 CheckedSmiUntag）
+    ↓
+调用 GetLatestCheckpointedFrame()
+    ↓
+创建 DeoptFrame（如果缓存为空）
+    ↓
+ForEachValue(..., AddDeoptUse)
+    ↓
+对每个值：node->add_use()
+    ↓
+use_count_ 增加
+    ↓
+DCE 阶段：检查 is_used()
+    ↓
+use_count_ > 0 → 节点被保留 ✅
+```
+
+---
+
+## 2. DeoptInfo 复用：同一字节码偏移的多个节点
+
+### 2.1 什么是"同一字节码偏移的多个节点"？
 
 **核心概念：** 一条字节码可能生成多个 IR 节点，这些节点共享同一个 DeoptFrame。
 
-**JavaScript 代码示例：**
+### 2.2 具体例子
+
+#### JavaScript 代码
 
 ```javascript
 function add(x, y) {
-  return x + y;  // offset 5
+  return x + y;
 }
 ```
 
-**字节码（简化）：**
+#### 字节码（简化）
 
 ```
 offset  bytecode
@@ -363,9 +222,9 @@ offset  bytecode
 10      Return
 ```
 
-**IR 节点（offset 5 生成多个节点）：**
+#### IR 节点（offset 5 生成多个节点）
 
-字节码 `Add r0, [0]` 展开成：
+**字节码 `Add r0, [0]` 展开成：**
 
 ```cpp
 // 所有这些节点都对应字节码 offset 5！
@@ -385,7 +244,55 @@ ValueNode* smi_result = Int32ToNumber(int32_result);
 
 **关键点：** 这 4 个节点都属于 **字节码 offset 5**！
 
-**复用流程：**
+### 2.3 DeoptFrame 复用机制
+
+#### 缓存机制
+
+**源代码位置：** `src/maglev/maglev-graph-builder.cc:1535-1563`
+
+```cpp
+DeoptFrame* MaglevGraphBuilder::GetLatestCheckpointedFrame() {
+  if (in_prologue_) {
+    return GetDeoptFrameForEntryStackCheck();
+  }
+
+  if (!latest_checkpointed_frame_) {  // ← 检查缓存
+    // 第一次：创建 DeoptFrame
+    latest_checkpointed_frame_ = zone()->New<InterpretedDeoptFrame>(
+        *compilation_unit_,
+        zone()->New<CompactInterpreterFrameState>(
+            *compilation_unit_, GetInLiveness(), current_interpreter_frame_),
+        GetClosure(),
+        current_interpreter_frame_.virtual_objects().head(),
+        BytecodeOffset(iterator_.current_offset()),  // ← 当前字节码偏移
+        GetCurrentSourcePosition(),
+        GetCallerDeoptFrame());
+
+    latest_checkpointed_frame_->as_interpreted().frame_state()->ForEachValue(
+        *compilation_unit_,
+        [&](ValueNode* node, interpreter::Register) { AddDeoptUse(node); });
+    AddDeoptUse(latest_checkpointed_frame_->as_interpreted().closure());
+  }
+
+  return latest_checkpointed_frame_;  // ← 后续调用直接返回缓存
+}
+```
+
+#### 缓存清除时机
+
+**源代码位置：** `src/maglev/maglev-graph-builder.h:2053`
+
+```cpp
+void MarkNodeContextEffects() {
+  latest_checkpointed_frame_ = nullptr;  // ← 清除缓存
+}
+```
+
+**何时清除？**
+- 处理下一条字节码时
+- 遇到可能改变上下文的操作时
+
+### 2.4 具体示例
 
 ```cpp
 // 字节码 offset 5: Add r0, [0]
@@ -422,304 +329,105 @@ ValueNode* int32_add = AddNewNode<Int32AddWithOverflow>(left_check, right_check)
 返回 DeoptFrame_5  ← 继续复用！
     ↓
 int32_add->set_eager_deopt_info(DeoptFrame_5)
-```
 
-#### 何时清除缓存？
-
-**1. 字节码边界**
-
-```cpp
-// src/maglev/maglev-graph-builder.h:2053
-void MarkNodeContextEffects() {
-  latest_checkpointed_frame_ = nullptr;  // ← 清除缓存
-  // ...
-}
-```
-
-**2. 副作用操作**
-
-```cpp
-// src/maglev/maglev-graph-builder.h:2073-2076
-if constexpr (NodeT::kProperties.can_write() ||
-             (NodeT::kProperties.can_throw() ||
-              NodeT::kProperties.can_allocate())) {
-  ClearCurrentAllocationBlock();
-  // latest_checkpointed_frame_ 也会被清除
-}
-```
-
-**3. 内联调用边界**
-
-```cpp
-// src/maglev/maglev-graph-builder.cc:8466
+// ========== 下一条字节码（清除缓存）==========
+iterator_.Advance();  // 移动到 offset 10
+MarkNodeContextEffects();  // 清除缓存
 latest_checkpointed_frame_ = nullptr;
-ClearCurrentAllocationBlock();
 ```
 
-### 2.4 复用示例（更正版）
+### 2.5 为什么可以复用？
 
-```javascript
-function complexAdd(a, b, c) {
-  let x = a + b;    // 偏移 5
-  let y = x + c;    // 偏移 10
-  return y + 100;   // 偏移 15
-}
+1. **状态相同：** 同一条字节码的所有节点看到的 InterpreterFrameState 相同
+2. **偏移相同：** 都对应同一个 bytecode_offset
+3. **反优化目标相同：** 都需要回到同一个字节码位置重新执行
+
+### 2.6 内存优化
+
+**不复用的情况（假设）：**
+
+```
+每个节点都创建 DeoptFrame：
+  left_check   → DeoptFrame_5a (x, y, r0)
+  right_check  → DeoptFrame_5b (x, y, r0)  ← 冗余！
+  int32_add    → DeoptFrame_5c (x, y, r0)  ← 冗余！
 ```
 
-**Maglev 编译过程：**
+**复用的情况（实际）：**
+
+```
+所有节点共享一个 DeoptFrame：
+  left_check   → DeoptFrame_5
+  right_check  → DeoptFrame_5  ← 共享
+  int32_add    → DeoptFrame_5  ← 共享
+```
+
+---
+
+## 3. 示例错误更正
+
+### 3.1 原错误
 
 ```
 偏移 5 (a + b):
-  latest_checkpointed_frame_ == null
-  ↓
-  创建 DeoptFrame_5 (包含 a, b, c 的状态)
-  ↓
-  n1 = CheckedSmiUntag(a) → deopt_info = DeoptFrame_5
-  n2 = CheckedSmiUntag(b) → deopt_info = DeoptFrame_5  ← 复用！
-  n3 = Int32AddWithOverflow(n1, n2) → deopt_info = DeoptFrame_5  ← 复用！
-
-偏移 10 (x + c):
-  latest_checkpointed_frame_ = null  ← 字节码边界清除
-  ↓
-  创建 DeoptFrame_10 (包含 x, c 的状态)  ← 注意：只有 x, c，没有 y
-  ↓
-  n4 = CheckedSmiUntag(x) → deopt_info = DeoptFrame_10
-  n5 = CheckedSmiUntag(c) → deopt_info = DeoptFrame_10  ← 复用！
-  n6 = Int32AddWithOverflow(n4, n5) → deopt_info = DeoptFrame_10  ← 复用！
-
-偏移 15 (y + 100):
-  latest_checkpointed_frame_ = null  ← 字节码边界清除
-  ↓
-  创建 DeoptFrame_15 (包含 y 的状态)
-  ↓
-  n7 = CheckedSmiUntag(y) → deopt_info = DeoptFrame_15
-  n8 = Int32Constant(100)
-  n9 = Int32AddWithOverflow(n7, n8) → deopt_info = DeoptFrame_15  ← 复用！
+  创建 DeoptFrame_5 (包含 a, b, c 的状态)  ← 错误！c 尚未计算
 ```
 
-**内存效率：**
-```
-不复用：9 个节点 × 3 个 DeoptFrame = 27 个引用
-复用：3 个 DeoptFrame × 每个被多个节点共享 = 高效！
-```
+### 3.2 更正
 
----
-
-## 3. DeoptInfo 与寄存器分配
-
-### 3.1 DeoptInfo 的结构
-
-```cpp
-// src/maglev/maglev-ir.h:2079-2121
-class DeoptInfo {
- protected:
-  DeoptInfo(Zone* zone, DeoptFrame* top_frame,
-            compiler::FeedbackSource feedback_to_update);
-
- public:
-  DeoptFrame& top_frame() { return *top_frame_; }
-
-  // === 关键：InputLocation 数组 ===
-  bool has_input_locations() const { return input_locations_ != nullptr; }
-  InputLocation* input_locations() const {
-    DCHECK_NOT_NULL(input_locations_);
-    return input_locations_;
-  }
-
-  void AllocateInputLocations(Zone* zone, size_t count) {
-    input_locations_ = zone->AllocateArray<InputLocation>(count);
-  }
-
- private:
-  DeoptFrame* top_frame_;                      // DeoptFrame
-  compiler::FeedbackSource feedback_to_update_;  // 反馈更新
-  InputLocation* input_locations_ = nullptr;   // ← 值的物理位置！
-  int deopt_index_ = -1;                       // Deopt 表索引
-};
-```
-
-### 3.2 InputLocation：值的物理位置
-
-```cpp
-// src/compiler/backend/instruction.h (Turbofan 共享)
-class InputLocation {
- public:
-  enum class Kind {
-    kRegister,      // 寄存器
-    kStackSlot,     // 栈槽
-    kConstant,      // 常量
-    kUnknown        // 未知（编译时）
-  };
-
-  static InputLocation FromRegister(Register reg);
-  static InputLocation FromDoubleRegister(DoubleRegister reg);
-  static InputLocation FromStackSlot(int index);
-  static InputLocation FromConstant(int index);
-
-  Kind kind() const;
-  int index() const;  // 寄存器编号或栈槽索引
-};
-```
-
-### 3.3 值在寄存器还是栈上？
-
-**编译时：ValueNode（IR 层面）**
-
-```cpp
-// 编译时，值是 ValueNode 指针
-DeoptFrame {
-  CompactInterpreterFrameState {
-    ValueNode** live_registers_and_accumulator_;
-    // [0] → n5: CheckedSmiUntag  (ValueNode*)
-    // [1] → n8: Int32Constant    (ValueNode*)
-    // [2] → n10: Int32Add        (ValueNode*)
-  }
-}
-```
-
-**代码生成后：InputLocation（机器层面）**
-
-```cpp
-// 寄存器分配后，记录物理位置
-DeoptInfo {
-  InputLocation* input_locations_;
-  // [0] → InputLocation::FromRegister(rax)    // n5 在 rax
-  // [1] → InputLocation::FromConstant(100)     // n8 是常量
-  // [2] → InputLocation::FromStackSlot(-16)    // n10 在栈上 rbp-16
-}
-```
-
-### 3.4 寄存器分配流程
-
-```
-IR 构建阶段：
-┌────────────────────────────────────┐
-│ DeoptFrame                         │
-│   CompactInterpreterFrameState     │
-│     ValueNode*[] = [n5, n8, n10]   │  ← IR 节点指针
-└────────────────────────────────────┘
-
-                ↓ 寄存器分配（Register Allocation）
-
-代码生成阶段：
-┌────────────────────────────────────┐
-│ DeoptInfo                          │
-│   InputLocation[] = [              │
-│     Register(rax),                 │  ← 物理寄存器
-│     Constant(100),                 │  ← 常量
-│     StackSlot(-16)                 │  ← 栈槽
-│   ]                                │
-└────────────────────────────────────┘
-```
-
-### 3.5 实际示例
+**JavaScript 代码：**
 
 ```javascript
-function example(a, b) {
-  let x = a | 0;
-  let y = b | 0;
-  return x + y;
+function foo(x, y) {
+  let a = x + 1;  // offset 0-4
+  let b = a + 2;  // offset 5-9
+  let c = b + 3;  // offset 10-14
+  return c;
 }
 ```
 
-**IR 阶段：**
+**字节码映射：**
 
 ```
-n1 = Parameter(a)
-n2 = Parameter(b)
-n3 = CheckedSmiUntag(n1)
-n4 = CheckedSmiUntag(n2)
-n5 = Int32AddWithOverflow(n3, n4)
-
-DeoptFrame at offset 5:
-  frame_state = [n1, n2, n3, n4]  ← ValueNode 指针
+offset   字节码           寄存器状态
+0        LdaSmi [1]       params: [x, y], locals: []
+1        Add r0           params: [x, y], locals: [x]
+2        Star r0          params: [x, y], locals: [a]  ← a 现在存在
+5        LdaSmi [2]       params: [x, y], locals: [a]
+6        Add r0           params: [x, y], locals: [a]  ← b 正在计算
+7        Star r1          params: [x, y], locals: [a, b]  ← b 现在存在
+10       LdaSmi [3]       params: [x, y], locals: [a, b]
+11       Add r1           params: [x, y], locals: [a, b]  ← c 正在计算
+12       Star r2          params: [x, y], locals: [a, b, c]  ← c 现在存在
+15       Ldar r2
+16       Return
 ```
 
-**寄存器分配后：**
-
-```
-n1 → Parameter slot (stack)
-n2 → Parameter slot (stack)
-n3 → rax  ← 分配到寄存器
-n4 → rcx  ← 分配到寄存器
-n5 → rdx  ← 分配到寄存器
-
-DeoptInfo:
-  input_locations = [
-    StackSlot(rbp+16),  // n1 (参数在栈上)
-    StackSlot(rbp+8),   // n2 (参数在栈上)
-    Register(rax),      // n3
-    Register(rcx)       // n4
-  ]
-```
-
-**机器码生成：**
-
-```asm
-; 函数入口
-mov rax, [rbp+16]  ; 加载 a
-mov rcx, [rbp+8]   ; 加载 b
-
-; CheckedSmiUntag(a)
-test rax, 1        ; 检查是否为 Smi
-jz deopt_label     ; 不是 Smi → deopt
-sar rax, 1         ; Untag: rax = a >> 1
-
-; CheckedSmiUntag(b)
-test rcx, 1
-jz deopt_label
-sar rcx, 1
-
-; Int32AddWithOverflow(rax, rcx)
-add rax, rcx
-jo deopt_label     ; 溢出 → deopt
-
-; 继续执行...
-
-deopt_label:
-  ; Deopt 入口，需要恢复栈帧
-  ; 从 InputLocation 读取值：
-  ; - n1: [rbp+16]
-  ; - n2: [rbp+8]
-  ; - n3: rax
-  ; - n4: rcx
-  call Deoptimizer::DeoptimizeFunction
-```
-
-### 3.6 为什么需要 InputLocation？
-
-**问题：Deopt 时值在哪里？**
-
-```javascript
-function test(x) {
-  let a = x | 0;       // a 可能在寄存器 rax
-  let b = a + 1;       // b 可能在寄存器 rcx
-  let c = b * 2;       // c 可能被溢出到栈上
-  return c + 100;      // deopt 点
-}
-
-// 如果 deopt 发生，需要恢复 a, b, c 的值
-// 但此时它们分别在：
-//   a → rax (寄存器)
-//   b → rcx (寄存器)
-//   c → [rbp-16] (栈槽)
-```
-
-**解决方案：InputLocation 记录每个值的位置**
+**正确的 DeoptFrame 状态：**
 
 ```cpp
-DeoptInfo {
-  InputLocation* input_locations_ = [
-    InputLocation::FromRegister(rax),      // a
-    InputLocation::FromRegister(rcx),      // b
-    InputLocation::FromStackSlot(-16)      // c
-  ];
+// 偏移 0-4 (a = x + 1)
+DeoptFrame_0 {
+  bytecode_offset: 0,
+  state: [param0=x, param1=y]  // a 尚未计算
+}
+
+// 偏移 5-9 (b = a + 2)  ← 更正！
+DeoptFrame_5 {
+  bytecode_offset: 5,
+  state: [param0=x, param1=y, r0=a]  // ← 只有 x, y, a
+}
+
+// 偏移 10-14 (c = b + 3)
+DeoptFrame_10 {
+  bytecode_offset: 10,
+  state: [param0=x, param1=y, r0=a, r1=b]  // ← 有 x, y, a, b（没有 c）
 }
 ```
 
 ---
 
-## 4. Deoptimization 与 GC 的关系
+## 4. GC 安全机制（真实源代码）
 
 ### 4.1 GC 在 Deopt 期间被禁用！
 
@@ -846,7 +554,7 @@ void Deoptimizer::MaterializeHeapObjects() {
 
 ### 4.4 TranslatedState - 从 DeoptInfo 到实际对象
 
-**源代码位置：** `src/deoptimizer/deoptimizer.h:299-305`
+**源代码位置：** `src/deoptimizer/deoptimizer.h:299`
 
 ```cpp
 class Deoptimizer : public Malloced {
@@ -909,338 +617,160 @@ stack[0] = (*handle).ptr();  // ← 总是有效！
 
 ---
 
-## 5. 完整示例：从字节码到 Deopt
+## 5. 完整示例（更正版）
 
-让我们通过一个完整的例子串联所有概念。
-
-### 5.1 JavaScript 源代码
+### 5.1 JavaScript 代码
 
 ```javascript
-function compute(x, y) {
-  let a = x | 0;   // 确保 x 是整数
-  let b = y | 0;   // 确保 y 是整数
-  let c = a + b;   // 整数加法
-  let d = c * 2;   // 整数乘法
-  return d;
+function add(x, y) {
+  let a = x + 1;  // offset 0-4
+  let b = a + 2;  // offset 5-9
+  return b;
 }
-
-// 预热
-%PrepareFunctionForOptimization(compute);
-compute(5, 10);
-compute(10, 20);
-
-// 强制 Maglev 编译
-%OptimizeMaglevOnNextCall(compute);
-let result = compute(15, 20);  // ✅ 优化路径
-console.log(result);  // 70
-
-// 触发 deopt
-compute(5, 3.14);  // ❌ y 不是 Smi → Deopt
 ```
 
 ### 5.2 字节码
 
 ```
-Bytecode:
-  0: Ldar a0           ; 加载参数 x 到累加器
-  2: BitwiseOr [0]     ; x | 0
-  4: Star0             ; 存储到 r0 (a)
-  5: Ldar a1           ; 加载参数 y 到累加器
-  7: BitwiseOr [1]     ; y | 0
-  9: Star1             ; 存储到 r1 (b)
- 10: Ldar r0           ; 加载 a
- 12: Add r1, [2]       ; a + b
- 14: Star2             ; 存储到 r2 (c)
- 15: Ldar r2           ; 加载 c
- 17: MulSmi [2], [3]   ; c * 2
- 19: Return            ; 返回
+offset   bytecode              寄存器状态
+0        LdaSmi [1]            [param0=x, param1=y]
+1        Add r0                [param0=x, param1=y]
+2        Star r0               [param0=x, param1=y, r0=a]
+5        LdaSmi [2]            [param0=x, param1=y, r0=a]
+6        Add r0                [param0=x, param1=y, r0=a]
+7        Star r1               [param0=x, param1=y, r0=a, r1=b]
+10       Ldar r1
+11       Return
 ```
 
-### 5.3 Maglev IR 构建
+### 5.3 IR 构建（Offset 5-9）
 
-```
-=== Prologue ===
-n1: InitialValue(x)        // param0
-n2: InitialValue(y)        // param1
-n3: FunctionEntryStackCheck
+```cpp
+// ========== 字节码 offset 5: LdaSmi [2] ==========
+current_interpreter_frame_.SetAccumulator(ConstantNode(2));
 
-=== Bytecode 0-4: a = x | 0 ===
-current_interpreter_frame_:
-  param0 = n1, param1 = n2, r0 = ?, r1 = ?, r2 = ?, acc = ?
+// ========== 字节码 offset 6: Add r0 ==========
 
-n4: CheckedSmiUntag(n1)     // 检查 x 是 Smi → 可能 deopt
-    ↓ GetLatestCheckpointedFrame()
-    latest_checkpointed_frame_ = null
-    ↓ 创建 DeoptFrame_0:
-        frame_state = [n1, n2]  // param0, param1
-        bytecode_offset = 0
+// 第一次调用 GetLatestCheckpointedFrame()
+ValueNode* left = GetAccumulator();  // Constant(2)
+ValueNode* right = GetRegister(0);   // a 的值
 
-n5: Int32BitwiseOr(n4, 0)
-n6: Int32ToNumber(n5)       // 转回 Smi
+// 节点 1: CheckedSmiUntag(left)
+ValueNode* left_int32 = AddNewNode<CheckedSmiUntag>(left);
+    ↓ 需要 EagerDeoptInfo
+    ↓ 调用 GetLatestCheckpointedFrame()
+    ↓ latest_checkpointed_frame_ == null  ← 缓存为空
+    ↓ 创建 DeoptFrame_6
+    ↓     bytecode_offset: 6
+    ↓     state: [param0=x, param1=y, r0=a, accumulator=2]  ← 只有 x, y, a
+    ↓ ForEachValue([param0, param1, r0, acc], AddDeoptUse)
+    ↓     x.use_count_++;     // ← deopt use
+    ↓     y.use_count_++;     // ← deopt use
+    ↓     a.use_count_++;     // ← deopt use
+    ↓     constant_2.use_count_++;  // ← deopt use
+    ↓ latest_checkpointed_frame_ = DeoptFrame_6  ← 缓存
+    ↓
+left_int32->set_eager_deopt_info(DeoptFrame_6)
 
-current_interpreter_frame_:
-  param0 = n1, param1 = n2, r0 = n6, acc = n6
+// 节点 2: CheckedSmiUntag(right) - 复用 DeoptFrame
+ValueNode* right_int32 = AddNewNode<CheckedSmiUntag>(right);
+    ↓ 需要 EagerDeoptInfo
+    ↓ 调用 GetLatestCheckpointedFrame()
+    ↓ latest_checkpointed_frame_ != null  ← 缓存命中！
+    ↓ 返回 DeoptFrame_6  ← 复用！
+    ↓
+right_int32->set_eager_deopt_info(DeoptFrame_6)  // ← 共享同一个 DeoptFrame
 
-latest_checkpointed_frame_ = null  ← 字节码边界清除
+// 节点 3: Int32AddWithOverflow
+ValueNode* result_int32 = AddNewNode<Int32AddWithOverflow>(left_int32, right_int32);
+    ↓ 需要 EagerDeoptInfo
+    ↓ 调用 GetLatestCheckpointedFrame()
+    ↓ 返回 DeoptFrame_6  ← 继续复用！
+    ↓
+result_int32->set_eager_deopt_info(DeoptFrame_6)
 
-=== Bytecode 5-9: b = y | 0 ===
-n7: CheckedSmiUntag(n2)     // 检查 y 是 Smi → 可能 deopt
-    ↓ GetLatestCheckpointedFrame()
-    latest_checkpointed_frame_ = null
-    ↓ 创建 DeoptFrame_5:
-        frame_state = [n1, n2, n6]  // param0, param1, r0
-        bytecode_offset = 5
+// 节点 4: Int32ToNumber（不需要 deopt info）
+ValueNode* result_smi = AddNewNode<Int32ToNumber>(result_int32);
 
-n8: Int32BitwiseOr(n7, 0)
-n9: Int32ToNumber(n8)
-
-current_interpreter_frame_:
-  param0 = n1, param1 = n2, r0 = n6, r1 = n9, acc = n9
-
-latest_checkpointed_frame_ = null  ← 清除
-
-=== Bytecode 10-14: c = a + b ===
-n10: CheckedSmiUntag(n6)    // r0 → int32
-    ↓ GetLatestCheckpointedFrame()
-    latest_checkpointed_frame_ = null
-    ↓ 创建 DeoptFrame_10:
-        frame_state = [n1, n2, n6, n9]  // ← 注意：只有 a, b，没有 c
-        bytecode_offset = 10
-
-n11: CheckedSmiUntag(n9)    // r1 → int32
-    ↓ GetLatestCheckpointedFrame()
-    ↑ latest_checkpointed_frame_ != null
-    ↑ 复用 DeoptFrame_10  ← 复用！
-
-n12: Int32AddWithOverflow(n10, n11)  // 可能溢出 → deopt
-    ↓ deopt_info = DeoptFrame_10  ← 复用！
-
-n13: Int32ToNumber(n12)
-
-current_interpreter_frame_:
-  param0 = n1, param1 = n2, r0 = n6, r1 = n9, r2 = n13, acc = n13
-
-latest_checkpointed_frame_ = null  ← 清除
-
-=== Bytecode 15-19: return c * 2 ===
-n14: CheckedSmiUntag(n13)
-    ↓ 创建 DeoptFrame_15
-
-n15: Int32Constant(2)
-n16: Int32MulWithOverflow(n14, n15)
-    ↓ deopt_info = DeoptFrame_15  ← 复用
-
-n17: Int32ToNumber(n16)
-n18: Return(n17)
+// 更新累加器
+current_interpreter_frame_.SetAccumulator(result_smi);
 ```
 
-### 5.4 寄存器分配
+### 5.4 DeoptFrame 复用总结
 
 ```
-寄存器分配结果：
-n1: stack(rbp+24)   // param0 (x)
-n2: stack(rbp+16)   // param1 (y)
-n4: rax             // CheckedSmiUntag(x)
-n5: rax             // BitwiseOr (复用 rax)
-n6: rax             // Int32ToNumber (复用 rax)
-n7: rcx             // CheckedSmiUntag(y)
-n8: rcx             // BitwiseOr (复用 rcx)
-n9: rcx             // Int32ToNumber (复用 rcx)
-n10: rax            // CheckedSmiUntag(n6)
-n11: rcx            // CheckedSmiUntag(n9)
-n12: rax            // Int32Add (复用 rax)
-n13: rax            // Int32ToNumber (复用 rax)
-n14: rax            // CheckedSmiUntag(n13)
-n15: immediate(2)   // 常量
-n16: rax            // Int32Mul (复用 rax)
-n17: rax            // Int32ToNumber (复用 rax)
+offset 6 的所有节点共享一个 DeoptFrame：
 
-InputLocation 分配：
-DeoptFrame_0:
-  input_locations = [
-    StackSlot(rbp+24),  // n1 (x)
-    StackSlot(rbp+16)   // n2 (y)
-  ]
-
-DeoptFrame_5:
-  input_locations = [
-    StackSlot(rbp+24),  // n1 (x)
-    StackSlot(rbp+16),  // n2 (y)
-    Register(rax)       // n6 (a)
-  ]
-
-DeoptFrame_10:
-  input_locations = [
-    StackSlot(rbp+24),  // n1 (x)
-    StackSlot(rbp+16),  // n2 (y)
-    Register(rax),      // n6 (a)
-    Register(rcx)       // n9 (b)
-  ]
-
-DeoptFrame_15:
-  input_locations = [
-    StackSlot(rbp+24),  // n1 (x)
-    StackSlot(rbp+16),  // n2 (y)
-    Register(rax),      // n6 (a)
-    Register(rcx),      // n9 (b)
-    Register(rax)       // n13 (c) - 覆盖了 a，但 deopt 时 a 不再需要
-  ]
+left_int32    → DeoptFrame_6 [x, y, a, acc=2]
+right_int32   → DeoptFrame_6  ← 共享
+result_int32  → DeoptFrame_6  ← 共享
 ```
 
-### 5.5 机器码生成
+### 5.5 DCE 阶段
 
-```asm
-; 函数入口
-push rbp
-mov rbp, rsp
-sub rsp, 8  ; 栈帧
+```cpp
+// DeadNodeSweepingProcessor 遍历所有节点
 
-; FunctionEntryStackCheck
-cmp rsp, [r13 + kStackLimitOffset]
-jb stack_overflow_deopt
+// 检查 left_int32
+if (!left_int32->is_used()) {  // use_count_ = 1 (被 result_int32 使用)
+  remove(left_int32);  // ← 不执行
+}
 
-; === a = x | 0 (offset 0) ===
-mov rax, [rbp+24]     ; 加载 x (n1)
+// 检查 x（参数）
+if (!x->is_used()) {  // use_count_ = 2 (normal use + deopt use)
+  remove(x);  // ← 不执行
+}
 
-; CheckedSmiUntag(x) - n4
-test rax, 1           ; 检查 Smi 标签位
-jz deopt_offset_0     ; 不是 Smi → deopt
-sar rax, 1            ; Untag: rax = x >> 1
-
-; BitwiseOr(rax, 0) - n5
-or rax, 0             ; 实际无操作
-
-; Int32ToNumber(rax) - n6
-lea rax, [rax*2]      ; Tag: rax = (rax << 1) | 0
-
-; === b = y | 0 (offset 5) ===
-mov rcx, [rbp+16]     ; 加载 y (n2)
-
-; CheckedSmiUntag(y) - n7
-test rcx, 1
-jz deopt_offset_5     ; ← Deopt 点！
-sar rcx, 1
-
-; BitwiseOr(rcx, 0) - n8
-or rcx, 0
-
-; Int32ToNumber(rcx) - n9
-lea rcx, [rcx*2]
-
-; === c = a + b (offset 10) ===
-; CheckedSmiUntag(a) - n10
-test rax, 1
-jz deopt_offset_10
-sar rax, 1
-
-; CheckedSmiUntag(b) - n11
-test rcx, 1
-jz deopt_offset_10    ; ← 复用同一 deopt label
-sar rcx, 1
-
-; Int32AddWithOverflow(rax, rcx) - n12
-add rax, rcx
-jo deopt_offset_10    ; ← 溢出 deopt
-
-; Int32ToNumber(rax) - n13
-lea rax, [rax*2]
-
-; === return c * 2 (offset 15) ===
-; CheckedSmiUntag(c) - n14
-test rax, 1
-jz deopt_offset_15
-sar rax, 1
-
-; Int32MulWithOverflow(rax, 2) - n16
-imul rax, rax, 2
-jo deopt_offset_15    ; ← 溢出 deopt
-
-; Int32ToNumber(rax) - n17
-lea rax, [rax*2]
-
-; Return
-mov rsp, rbp
-pop rbp
-ret
-
-; === Deopt 标签 ===
-deopt_offset_0:
-  ; 保存寄存器状态
-  ; input_locations = [stack(rbp+24), stack(rbp+16)]
-  mov rdi, deopt_info_0
-  call Builtin::kDeoptimize
-
-deopt_offset_5:
-  ; input_locations = [stack(rbp+24), stack(rbp+16), rax]
-  mov rdi, deopt_info_5
-  call Builtin::kDeoptimize
-
-deopt_offset_10:
-  ; input_locations = [stack(rbp+24), stack(rbp+16), rax, rcx]
-  mov rdi, deopt_info_10
-  call Builtin::kDeoptimize
-
-deopt_offset_15:
-  ; input_locations = [stack(rbp+24), stack(rbp+16), rax, rcx, rax]
-  mov rdi, deopt_info_15
-  call Builtin::kDeoptimize
+// 检查 a
+if (!a->is_used()) {  // use_count_ = 2 (用于 Add + deopt use)
+  remove(a);  // ← 不执行
+}
 ```
 
-### 5.6 Deopt 触发
+### 5.6 运行时 Deopt
 
-```javascript
-compute(5, 3.14);  // y = 3.14 (HeapNumber, 不是 Smi)
-```
+假设在 `right_int32 = CheckedSmiUntag(right)` 时触发 deopt（right 不是 Smi）：
 
-**执行流程：**
+```cpp
+// 1. CPU 状态
+rax: 0x5678  // constant 2 (Smi)
+rbx: 0x1234  // a 的值 (Smi)
+rcx: 0xabcd  // x 的值 (Smi)
+rdx: 0xef01  // y 的值 (Smi)
 
-```
-1. 机器码执行到 offset 5:
-   mov rcx, [rbp+16]     ; rcx = 3.14 (HeapNumber 指针)
-   test rcx, 1           ; 检查 Smi 标签位
-   jz deopt_offset_5     ; ← 跳转！HeapNumber 不是 Smi
+// 2. Deoptimizer 启动
+Deoptimizer deopt = new Deoptimizer(...);
+disallow_garbage_collection_ = new DisallowGarbageCollection();  // ← GC 禁用
 
-2. 进入 deopt_offset_5:
-   ; 此时寄存器状态：
-   ;   rax = 5 (Smi tagged, 0b1010)
-   ;   rcx = 0x... (HeapNumber 指针)
-   ;   [rbp+24] = 5 (Smi)
-   ;   [rbp+16] = 3.14 (HeapNumber)
+// 3. 读取 DeoptFrame_6
+DeoptFrame* frame = right_int32->eager_deopt_info()->top_frame();
+// frame->bytecode_offset = 6
+// frame->frame_state = [param0, param1, r0, acc]
 
-   mov rdi, deopt_info_5  ; 传递 DeoptInfo
-   call Builtin::kDeoptimize
+// 4. 从 InputLocation 读取值（GC 仍被禁用）
+InputLocation* locs = right_int32->eager_deopt_info()->input_locations();
+// locs[0] = kRegister(rcx)  → param0 = 0xabcd
+// locs[1] = kRegister(rdx)  → param1 = 0xef01
+// locs[2] = kRegister(rbx)  → r0 = 0x1234
+// locs[3] = kRegister(rax)  → acc = 0x5678
 
-3. Builtin::kDeoptimize 执行：
-   a. 禁用 GC:
-      disallow_garbage_collection_ = new DisallowGarbageCollection();
+// 5. MaterializeHeapObjects（GC 仍被禁用）
+DirectHandle<Object> param0_obj = Smi::FromInt(0xabcd);
+DirectHandle<Object> param1_obj = Smi::FromInt(0xef01);
+DirectHandle<Object> r0_obj = Smi::FromInt(0x1234);
+DirectHandle<Object> acc_obj = Smi::FromInt(0x5678);
 
-   b. 从 DeoptInfo 读取 InputLocation
-   c. 恢复值到临时数组：
-      - values[0] = ReadStack(rbp+24) = Smi(5)      // x
-      - values[1] = ReadStack(rbp+16) = HeapNumber(3.14)  // y
-      - values[2] = ReadRegister(rax) = Smi(5)     // a
+// 6. 写入输出帧（构建解释器帧）
+output_frame[0] = (*param0_obj).ptr();  // x
+output_frame[1] = (*param1_obj).ptr();  // y
+output_frame[2] = (*r0_obj).ptr();      // a
+output_frame[3] = (*acc_obj).ptr();     // accumulator
 
-   d. MaterializeHeapObjects() (GC 仍被禁用)
-      - 使用 DirectHandle<Object> 包装所有值
+// 7. 清理
+delete deopt;  // ← DisallowGarbageCollection 析构，GC 重新允许
 
-   e. 创建解释器帧：
-      - frame.param(0) = values[0]  // x = 5
-      - frame.param(1) = values[1]  // y = 3.14
-      - frame.register(0) = values[2]  // r0 = 5 (a)
-
-   f. 设置字节码偏移 = 5
-
-   g. 清理并允许 GC:
-      delete deoptimizer;  // DisallowGarbageCollection 析构
-
-   h. 跳转到解释器执行 offset 5
-
-4. 解释器继续执行：
-   Bytecode 5: Ldar a1      ; acc = 3.14 (HeapNumber)
-   Bytecode 7: BitwiseOr    ; 调用 runtime，转换为 3
-   Bytecode 9: Star1        ; r1 = 3
-   ...
-   (继续执行，使用通用路径而非优化的整数快速路径)
+// 8. 返回解释器，从 offset 6 重新执行
+return to_interpreter(bytecode_offset = 6);
 ```
 
 ---
@@ -1249,33 +779,32 @@ compute(5, 3.14);  // y = 3.14 (HeapNumber, 不是 Smi)
 
 ### 关键要点
 
-1. **FrameState 不是每个字节码一个**
-   - `current_interpreter_frame_` 是唯一的工作状态
-   - `DeoptFrame` 是按需创建的快照
-   - `MergePointInterpreterFrameState` 只在控制流汇合点
-
-2. **Deopt Use = 引用计数机制**
+1. **Deopt Use = 引用计数**
    - `AddDeoptUse(node)` → `node->use_count_++`
    - DCE 检查 `use_count_ > 0`，有 deopt use 的节点不会被删除
-   - DeoptFrame 不能删除，因为运行时需要它来重建解释器帧
 
-3. **DeoptFrame 可以复用**
-   - `latest_checkpointed_frame_` 缓存同一字节码偏移的快照
+2. **DeoptFrame 复用**
    - 同一字节码的多个节点共享一个 DeoptFrame
-   - 字节码边界/副作用操作清除缓存
+   - 通过 `latest_checkpointed_frame_` 缓存实现
+   - 节省内存，提高性能
 
-4. **DeoptInfo 的值在寄存器和栈上**
-   - IR 阶段：ValueNode 指针
-   - 代码生成后：InputLocation 记录物理位置（寄存器/栈槽/常量）
-   - Deopt 时从 InputLocation 恢复值
-
-5. **GC 安全机制**
-   - **核心：Deopt 期间完全禁用 GC**
+3. **GC 安全**
+   - **核心机制：Deopt 期间完全禁用 GC**
    - `DisallowGarbageCollection` 保证不会有 GC
-   - `MaterializeHeapObjects` 使用 DirectHandle 额外保护
-   - 整个过程使用 Handle 机制保护对象
+   - `MaterializeHeapObjects` 使用 Handle 额外保护
 
-### 源代码引用表
+4. **数据结构层次**
+   ```
+   InterpreterFrameState          ← 图构建时的可变状态
+         ↓ 快照
+   CompactInterpreterFrameState   ← DeoptFrame 中的压缩状态
+         ↓ 运行时读取
+   InputLocation[]                ← 寄存器/栈位置
+         ↓ MaterializeHeapObjects
+   输出帧（解释器栈）             ← 实际对象指针
+   ```
+
+### 源代码引用
 
 | 功能 | 文件 | 行号 |
 |------|------|------|
@@ -1289,5 +818,3 @@ compute(5, 3.14);  // y = 3.14 (HeapNumber, 不是 Smi)
 | DisallowGarbageCollection 成员 | src/deoptimizer/deoptimizer.h | 313 |
 | MaterializeHeapObjects | src/deoptimizer/deoptimizer.cc | 2956-2994 |
 | TranslatedState 定义 | src/deoptimizer/deoptimizer.h | 299-305 |
-| InputLocation | src/compiler/backend/instruction.h | - |
-| Deoptimizer | src/deoptimizer/deoptimizer.cc | - |

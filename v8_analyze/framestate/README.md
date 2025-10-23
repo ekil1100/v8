@@ -9,8 +9,7 @@ FrameState 是 V8 优化编译器（Maglev、TurboFan/Turboshaft）中的核心�
 | `framestate.md` | 103KB | FrameState 完整分析（主文档） | ⭐⭐⭐⭐⭐ |
 | `framestate_construction.md` | 10KB | 构建过程详解 | ⭐⭐⭐⭐ |
 | `framestate_cfg_mechanism.md` | 15KB | 在 CFG 中的机制 | ⭐⭐⭐⭐ |
-| `framestate_advanced_corrected.md` | 23KB | 高级主题（修订版） | ⭐⭐⭐⭐ |
-| `framestate_advanced.md` | 38KB | 高级主题（原始版） | ⭐⭐⭐ |
+| `framestate_advanced.md` | 24KB | 高级主题和最佳实践 | ⭐⭐⭐⭐ |
 | `interpreter_frame_data_structure.md` | 8KB | 解释器帧结构 | ⭐⭐⭐ |
 
 ## 什么是 FrameState？
