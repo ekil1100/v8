@@ -1938,67 +1938,272 @@ out/x64.debug/d8 --allow-natives-syntax \
   maglev-try-catch-loop.js
 ```
 
-#### 📊 输出示例
+#### 📊 输出示例及逐行解释
 
 ```
 [manually marking 0x... processWithErrorHandling for optimization to MAGLEV]
 [compiling method processWithErrorHandling (target MAGLEV)]
 Concurrent maglev has been disabled for tracing.
+```
 
+**解释**:
+- `manually marking ... for optimization to MAGLEV`: 因为我们调用了 `%OptimizeMaglevOnNextCall`，V8 将函数标记为待 Maglev 优化
+- `target MAGLEV`: 目标编译器是 Maglev（中级优化编译器），不是 TurboFan
+- `Concurrent maglev has been disabled`: 由于启用了追踪，并发编译被禁用，改为同步编译（方便调试）
+
+---
+
+```
 == New block (merge) ==
   4 : 33 03 00 00       GetNamedProperty a0, [0], [0]
   n10: LoadTaggedField [n2]  // 加载 arr.length
+```
+
+**解释**:
+- `== New block (merge) ==`: 创建一个新的控制流基本块（basic block），这是循环前的初始化块
+- `4 : 33 03 00 00 GetNamedProperty a0, [0], [0]`:
+  - `4`: 字节码偏移量（第 4 字节）
+  - `33 03 00 00`: 字节码指令的字节
+  - `GetNamedProperty a0, [0], [0]`: 从参数 `a0` (即 `arr`) 获取属性，常量池索引 `[0]` 存储的是 `"length"` 字符串
+  - 对应 JavaScript: `arr.length`
+- `n10: LoadTaggedField [n2]`:
+  - `n10`: Maglev IR 节点编号
+  - `LoadTaggedField`: Maglev 的 IR 操作，从对象 `n2` (arr) 加载标记字段（length 字段）
+  - Maglev 知道这是访问 length 属性，可以优化为直接字段访问
+
+---
+
+```
   8 : 77 f8 02          TestLessThan r1, [2]
   n16: TaggedEqual [n13, n15]  // i < length
+```
 
+**解释**:
+- `8 : 77 f8 02 TestLessThan r1, [2]`:
+  - 字节码偏移 8，测试寄存器 `r1` (存储变量 `i`) 是否小于累加器中的值
+  - `[2]`: 反馈槽索引，用于类型反馈
+  - 对应 JavaScript: `i < arr.length`
+- `n16: TaggedEqual [n13, n15]`:
+  - Maglev IR 节点，比较两个节点 `n13` 和 `n15` 是否相等（或小于）
+  - 这是循环条件判断
+
+---
+
+```
 == New block (loop header) ==
 * VOs (Merge Frame State):
   r0: n32<> <- n42<>  // Phi(sum)
   r1: n33<> <- n44<>  // Phi(i)
+```
 
+**解释**:
+- `== New block (loop header) ==`: 循环头块，每次循环迭代都会回到这里
+- `* VOs (Merge Frame State)`: 虚拟对象/变量状态（Virtual Objects），显示寄存器的值来源
+- `r0: n32<> <- n42<>  // Phi(sum)`:
+  - `r0`: 寄存器 0（存储 `sum` 变量）
+  - `n32`: 当前的 Phi 节点
+  - `<- n42`: 来自节点 `n42`（循环体更新后的值）
+  - **Phi 节点**: SSA (Static Single Assignment) 形式的关键，在循环头合并来自不同路径的值：
+    - 第一次进入循环：`sum = 0`（初始值）
+    - 后续迭代：`sum = 上次循环更新后的值`
+- `r1: n33<> <- n44<>  // Phi(i)`: 同理，`i` 的 Phi 节点
+
+**为什么需要 Phi 节点？**
+- SSA 要求每个变量只赋值一次
+- 循环变量会被多次赋值，所以在循环头用 Phi 节点"合并"多个来源的值
+
+---
+
+```
   18 : 35 03 05          GetKeyedProperty a0, [5]
   n19: LoadTaggedField [n2]  // arr[i]
+```
+
+**解释**:
+- `18 : 35 03 05 GetKeyedProperty a0, [5]`:
+  - 从数组 `a0` (arr) 获取键控属性（即数组元素）
+  - `[5]`: 反馈槽，类型反馈告诉 Maglev 这是 PACKED_SMI_ELEMENTS（紧凑的小整数数组）
+  - 对应 JavaScript: `arr[i]`
+- `n19: LoadTaggedField [n2]`:
+  - Maglev 知道这是数组元素访问，可以优化为直接内存读取（跳过属性查找）
+
+---
+
+```
   21 : 4f 02 04          MulSmi [2], [4]
   n21: Int32MultiplyWithOverflow [n19, n20]
+```
+
+**解释**:
+- `21 : 4f 02 04 MulSmi [2], [4]`:
+  - `MulSmi`: 乘以小整数（Small Integer）
+  - `[2]`: 立即数 2
+  - `[4]`: 反馈槽索引
+  - 对应 JavaScript: `arr[i] * 2`
+- `n21: Int32MultiplyWithOverflow [n19, n20]`:
+  - Maglev 推断出类型是 Int32（32位整数）
+  - `Int32MultiplyWithOverflow`: 使用优化的 32 位整数乘法，并检查溢出
+  - 如果溢出（结果超出 Int32 范围），会触发去优化（deoptimization）
+
+---
+
+```
   24 : 40 f9 03          Add r0, [3]
   n22: Int32AddWithOverflow [n18, n21]  // sum += result
+```
+
+**解释**:
+- `24 : 40 f9 03 Add r0, [3]`:
+  - 将累加器的值（乘法结果）加到寄存器 `r0` (sum)
+  - 对应 JavaScript: `sum += arr[i] * 2`
+- `n22: Int32AddWithOverflow [n18, n21]`:
+  - 同样是优化的 Int32 加法
+  - 检查溢出
+
+---
+
+```
   27 : 1b f9 f6          Mov r0, r3
   30 : d2                Star0
   31 : 96 15             Jump [21]
   n24: Jump  // 跳过 catch block
+```
 
+**解释**:
+- `27 : 1b f9 f6 Mov r0, r3`: 移动寄存器值（保存中间结果）
+- `30 : d2 Star0`: 将累加器的值存储到寄存器 `r0`
+- `31 : 96 15 Jump [21]`:
+  - 无条件跳转 21 个字节
+  - **关键**: 这个跳转跳过了 catch block（因为 try block 正常执行完毕）
+  - 对应 JavaScript: try 块执行完，不进入 catch
+- `n24: Jump`: Maglev IR 的跳转节点
+
+---
+
+```
 == New block (exception handler) ==
 - Creating exception merge state
   34 : 8d f6 01          CreateCatchContext r3, [1]
   46 : 4d 00 07          AddSmi [0], [7]
   // catch (e) { sum += 0; }
+```
 
+**解释**:
+- `== New block (exception handler) ==`: 异常处理器块，只有抛异常时才会执行
+- `Creating exception merge state`: 为异常情况创建合并状态（恢复现场）
+- `34 : 8d f6 01 CreateCatchContext r3, [1]`:
+  - 创建 catch 上下文（存储异常对象 `e`）
+  - `[1]`: 常量池索引，指向 CATCH_SCOPE 信息
+- `46 : 4d 00 07 AddSmi [0], [7]`:
+  - 对应 JavaScript: `sum += 0`（catch block 中的操作）
+  - 实际上这是空操作，编译器可能会优化掉
+
+---
+
+```
 == Loop increment ==
   54 : 59 08             Inc [8]
   n44: Int32IncrementWithOverflow [n34]  // i++
+```
+
+**解释**:
+- `== Loop increment ==`: 循环递增块
+- `54 : 59 08 Inc [8]`:
+  - 递增操作
+  - `[8]`: 反馈槽
+  - 对应 JavaScript: `i++`
+- `n44: Int32IncrementWithOverflow [n34]`:
+  - Maglev 优化的 Int32 递增，检查溢出
+
+---
+
+```
   57 : 95 35 00 09       JumpLoop [53], [0], [9]
   n45: ReduceInterruptBudgetForLoop(42)
   n46: JumpLoop  // 回到循环头
+```
 
+**解释**:
+- `57 : 95 35 00 09 JumpLoop [53], [0], [9]`:
+  - 向后跳转 53 个字节（回到循环头）
+  - `[0]`: 循环深度
+  - `[9]`: 反馈槽索引
+- `n45: ReduceInterruptBudgetForLoop(42)`:
+  - **关键**: 减少中断预算（interrupt budget）
+  - V8 使用中断预算来决定何时进行 OSR (On-Stack Replacement)
+  - 如果预算耗尽，可能会在循环中从 Maglev 代码跳到 TurboFan 代码
+  - 也用于周期性检查（如 GC、调试器中断）
+- `n46: JumpLoop`: 跳回循环头
+
+---
+
+```
 Handler Table (size = 16)
    from   to       hdlr (prediction,   data)
   (  16,  31)  ->    33 (prediction=1, data=2)
+```
 
+**解释**:
+- `Handler Table`: 异常处理器表，运行时用于查找异常处理器
+- `from   to`: 受保护的字节码范围
+  - `(16, 31)`: 字节码偏移 16 到 31 之间（try block）
+- `hdlr`: handler 的缩写，异常处理器的位置
+  - `-> 33`: 如果在偏移 16-31 之间抛异常，跳转到偏移 33（catch block）
+- `prediction=1`: 预测这个 handler 会被执行（1 表示可能，用于分支预测）
+- `data=2`: 附加数据（如上下文深度）
+
+**工作原理**:
+1. 运行时在 try block (16-31) 中执行
+2. 如果抛异常（如 `arr[i]` 访问越界）
+3. 查询 Handler Table，找到对应的 handler 偏移 33
+4. 跳转到 catch block，执行 `catch (e) { sum += 0; }`
+
+---
+
+```
 [completed compiling processWithErrorHandling (target MAGLEV) - took 40.821 ms]
 Optimized result: 84000
 ```
 
-**关键观察点**:
-- **Phi nodes** (`n32`, `n33`): 循环变量 `sum` 和 `i` 在循环头被合并，这是 SSA 形式的体现
-- **Int32 operations**: Maglev 推断出类型为 Int32，使用优化的整数运算
-- **Exception handler block**: 为 try block 单独创建异常处理器块
-- **Handler Table**: 字节码偏移 16-31 (try block) 的异常会跳转到偏移 33 (catch block)
-- **ReduceInterruptBudgetForLoop**: 循环中断预算管理，用于 OSR（On-Stack Replacement）
+**解释**:
+- `completed compiling`: 编译完成
+- `took 40.821 ms`: 编译耗时 40.821 毫秒（这是图构建的耗时，实际运行更快）
+- `Optimized result: 84000`: 函数执行结果（1000 个元素，每个 42，乘以 2，求和 = 84000）
 
-**性能影响**:
-- Try-catch 会增加控制流复杂度，但 Maglev 仍能优化
-- 如果 catch block 永远不执行，开销很小（只是额外的跳转）
-- Handler table 在运行时几乎无开销
+---
+
+#### 🔍 关键概念总结
+
+| 概念 | 解释 | 作用 |
+|-----|------|------|
+| **Phi 节点** | SSA 形式中合并多个来源值的节点 | 循环头合并初始值和更新后的值 |
+| **Int32 优化** | 使用 32 位整数运算代替通用运算 | 性能提升，但需检查溢出 |
+| **Handler Table** | 字节码范围到异常处理器的映射表 | 运行时快速找到 catch block |
+| **Interrupt Budget** | 中断预算，计数器递减 | 决定 OSR 时机和周期性检查 |
+| **基本块 (Basic Block)** | 顺序执行的指令序列（无分支） | 控制流图的最小单位 |
+| **Tagged/Untagged** | Tagged: 带类型标记的值；Int32: 无标记整数 | Tagged 更通用，Int32 更快 |
+
+#### ⚡ 性能影响
+
+**Try-Catch 开销**:
+- ✅ **正常路径（无异常）**: 几乎零开销
+  - 只是一个无条件跳转（`Jump [21]`）跳过 catch block
+  - Handler Table 不会被查询
+  - 现代 CPU 分支预测几乎完美（try 路径更可能）
+
+- ❌ **异常路径（抛异常）**: 较大开销
+  - 查询 Handler Table
+  - 创建 Catch Context
+  - 栈展开（stack unwinding）
+  - 但这是罕见情况，不影响热路径性能
+
+**Maglev vs Ignition**:
+- Ignition (解释器): 逐字节码解释执行
+- Maglev (优化编译器):
+  - Int32 优化运算（无装箱/拆箱）
+  - 类型推断（知道是 PACKED_SMI_ELEMENTS）
+  - 直接内存访问（跳过属性查找）
+  - **性能提升**: 通常 5-10x
 
 #### 🎯 适用场景
 
