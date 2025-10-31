@@ -248,7 +248,7 @@ Constant pool (size = 1)
 - 索引 0：指向 CATCH_SCOPE 的 ScopeInfo
 - CreateCatchContext 指令使用 `[0]` 访问此常量
 
-**ScopeInfo 详细信息**：参见 [ScopeInfo 深度解析](./scope_info_deep_dive.md)
+**ScopeInfo 详细信息**：参见 [ScopeInfo 深度解析](../runtime/scope_info_deep_dive.md)
 
 #### 4. Handler Table（异常处理表）
 
@@ -274,7 +274,7 @@ Handler Table (size = 16)
 2. 如果抛出异常 → 跳转到偏移 9（异常处理路径）
 3. 如果没有异常 → 偏移 8 Return（正常路径）
 
-**多个异常处理器的对应关系**：详见 [exception_handler_mapping.md](./exception_handler_mapping.md)
+**多个异常处理器的对应关系**：详见 [exception_handler_mapping.md](../runtime/exception_handler_mapping.md)
 
 #### 5. Source Position Table
 
@@ -525,7 +525,7 @@ Block b0
 
 5. **`7/6: FunctionEntryStackCheck`**：
 
-   - **栈溢出检查**，详见 [FunctionEntryStackCheck 详解](./function_entry_stack_check.md)
+   - **栈溢出检查**，详见 [FunctionEntryStackCheck 详解](../runtime/function_entry_stack_check.md)
    - **`↳ lazy @-1`**：懒惰解优化点，字节码偏移 -1（函数入口）
    - **3 live vars**：需要恢复 3 个活跃变量（this, arr, closure）
 
@@ -562,7 +562,7 @@ Block b1
 
    - **操作**：获取 `arr.length`
    - **`[0]`**：常量池索引 0（"length" 字符串）
-   - **`[0]`**：反馈槽位索引 0，详见 [FeedbackVector 和反馈槽位详解](./feedback_vector_and_slots.md)
+   - **`[0]`**：反馈槽位索引 0，详见 [FeedbackVector 和反馈槽位详解](../optimization/feedback_vector_and_slots.md)
    - **注意**：实际的 CheckMaps 和 LoadTaggedFieldForProperty 在 b2 中
 
 4. **`9/9: Jump b2`**：
@@ -593,11 +593,11 @@ Block b2 (effects:)
 1. **`Block b2 (effects:)`**：
 
    - **循环头**
-   - **`(effects:)`**：无副作用，详见 [循环副作用详解](./loop_effects_deep_dive.md)
+   - **`(effects:)`**：无副作用，详见 [循环副作用详解](../compiler/loop_effects_deep_dive.md)
 
 2. **`10/10: φᴵ r0 (n34, n25)`**：
 
-   - **φ 节点**：合并 sum 的值，详见 [Phi 节点详解](./phi_node_deep_dive.md)
+   - **φ 节点**：合并 sum 的值，详见 [Phi 节点详解](../compiler/phi_node_deep_dive.md)
    - **`(n34, n25)`**：两个输入值
      - `n34`：来自 b1 的初始值 0
      - `n25`：来自 b3 的新值（sum + arr[i]）
@@ -750,7 +750,7 @@ Block b3
 
 12. **`22/28: ReduceInterruptBudgetForLoop(20)`**：
 
-    - **减少中断预算**，详见 [中断预算详解](./interrupt_budget_deep_dive.md)
+    - **减少中断预算**，详见 [中断预算详解](../runtime/interrupt_budget_deep_dive.md)
     - **20**：每次循环减少 20
     - **`[v1/n27:[rcx|R|t]]`**：FeedbackCell 对象（rcx）
     - **`↳ lazy @30`**：懒惰解优化点，字节码偏移 30
@@ -944,7 +944,7 @@ Block b0
 
 4. **10/6: FunctionEntryStackCheck**
 
-   - 栈溢出检查，参见 [function_entry_stack_check_deep_dive.md](./function_entry_stack_check_deep_dive.md)
+   - 栈溢出检查，参见 [function_entry_stack_check_deep_dive.md](../runtime/function_entry_stack_check.md)
    - Deopt: `↳ lazy @-1 (3 live vars)`（如果栈溢出，懒反优化）
 
 5. **11/7: Jump b1**
@@ -986,7 +986,6 @@ Block b1
    - 检查 `num` 是否为 Smi（小整数）
    - 如果是 Smi，则解码为 int32（`w32`）
    - Deopt: `↱ eager @2 (4 live vars)`（如果不是 Smi，立即反优化）
-   - 参见 [smi_operations_deep_dive.md](./smi_operations_deep_dive.md)
 
 3. **ConstantGapMove(n10 → [rcx|R|w32])**
 
@@ -1028,7 +1027,7 @@ Block b2
 
 2. **14/17: ReduceInterruptBudgetForReturn(9)**
 
-   - 减少中断预算，参见 [interrupt_budget_deep_dive.md](./interrupt_budget_deep_dive.md)
+   - 减少中断预算，参见 [interrupt_budget_deep_dive.md](../runtime/interrupt_budget_deep_dive.md)
    - 参数 `9` 是 Bytecode 偏移量（对应 `Return` 指令的位置）
 
 3. **ConstantGapMove(n15 → [rax|R|t])**
@@ -1313,7 +1312,7 @@ out/x64.debug/d8 --allow-natives-syntax --no-maglev-loop-peeling --print-maglev-
 
 ##### FeedbackVector 对比
 
-**详细的 IC 状态解释参见**: [inline_cache_deep_dive.md](./inline_cache_deep_dive.md)
+**详细的 IC 状态解释参见**: [inline_cache_deep_dive.md](../optimization/inline_cache_deep_dive.md)
 
 **10 次预热（优化失败）**：
 ```
@@ -1409,7 +1408,6 @@ Block b1
    - 检查 `a` 是否为 Smi，并解标记为 int32
    - Deopt: `↱ eager @5 (6 live vars)`（如果不是 Smi，立即反优化）
    - 输出：`[rax|R|w32]`（32 位整数）
-   - 参见 [smi_operations_deep_dive.md](./smi_operations_deep_dive.md)
 
 3. **GapMove([stack:-8|t] → [rcx|R|t])**
    - 将参数 `b` 从栈移动到 `rcx`
@@ -1437,7 +1435,7 @@ Block b1
    - 将 FeedbackCell 移动到 `rcx`
 
 9. **12/13: ReduceInterruptBudgetForReturn(8)**
-   - 减少中断预算，参见 [interrupt_budget_deep_dive.md](./interrupt_budget_deep_dive.md)
+   - 减少中断预算，参见 [interrupt_budget_deep_dive.md](../runtime/interrupt_budget_deep_dive.md)
 
 10. **13/14: Int32ToNumber [v11/n11:[rax|R|w32]] → [rcx|R|t]**
     - 将 int32 结果转换为 JavaScript Number（Smi 或 HeapNumber）
@@ -1715,7 +1713,7 @@ Block b2
    - 将 Error 构造函数移动到 `rdi`
    - 节点 `n12` 是 `Constant(0x... <JSFunction Error>)`
    - 从 FeedbackVector 可以看到：`LoadGlobalNotInsideTypeof MONOMORPHIC`
-   - **详细解释参见**: [inline_cache_deep_dive.md](./inline_cache_deep_dive.md)
+   - **详细解释参见**: [inline_cache_deep_dive.md](../optimization/inline_cache_deep_dive.md)
 
    **什么是 LoadGlobalNotInsideTypeof？**
 
@@ -1825,7 +1823,7 @@ Block b3
    - 节点 `n17` 是 `Constant(0x... <JSFunction parseInt>)`
    - FeedbackVector：`LoadGlobalNotInsideTypeof MONOMORPHIC`
    - **MONOMORPHIC 状态**：`parseInt` 总是指向同一个全局函数，Maglev 将其作为编译时常量嵌入
-   - **详细解释参见**: [inline_cache_deep_dive.md](./inline_cache_deep_dive.md)
+   - **详细解释参见**: [inline_cache_deep_dive.md](../optimization/inline_cache_deep_dive.md)
 
 2. **ConstantGapMove(n18 → [rsi|R|t])**
 
@@ -1850,7 +1848,7 @@ Block b3
 
    **什么是 Call MONOMORPHIC？**
 
-   这是**函数调用的 IC 状态**，表示调用目标的稳定性。**详细解释参见**: [inline_cache_deep_dive.md](./inline_cache_deep_dive.md)
+   这是**函数调用的 IC 状态**，表示调用目标的稳定性。**详细解释参见**: [inline_cache_deep_dive.md](../optimization/inline_cache_deep_dive.md)
 
 
    - **Call**: 函数调用操作的反馈
@@ -1946,7 +1944,7 @@ Block b4 (exception handler)
    - 清除待处理的异常消息
    - 将 `the_hole_value` 设置为待处理消息（表示已处理）
    - 返回旧的待处理消息到 `rcx`
-   - **详细处理逻辑参见**: [pending_message_deep_dive.md](./pending_message_deep_dive.md)
+   - **详细处理逻辑参见**: [pending_message_deep_dive.md](../runtime/pending_message_deep_dive.md)
 
 4. **ConstantGapMove(n20 → [rax|R|t])**
 
@@ -2214,19 +2212,19 @@ Processing bytecode @11: JumpIfFalse
 
 ### 本系列相关文档
 
-- [ScopeInfo 深度解析](./scope_info_deep_dive.md) - 作用域信息详解
-- [栈帧布局详解](./stack_frame_layout.md) - V8 栈帧结构和槽位编号
-- [Live Range 和寄存器分配](./live_range_and_register_allocation.md) - 值的生命周期与寄存器分配
-- [FunctionEntryStackCheck 详解](./function_entry_stack_check.md) - 栈溢出检查和活跃变量恢复
-- [节点 ID 和值追踪系统](./node_id_and_value_tracking.md) - 节点编号和值来源追踪
-- [FeedbackVector 和反馈槽位详解](./feedback_vector_and_slots.md) - 运行时类型反馈和 Maglev 优化
-- [Phi 节点详解](./phi_node_deep_dive.md) - SSA 形式中的值合并机制
-- [中断预算详解](./interrupt_budget_deep_dive.md) - 循环中断检查和预算减少机制
-- [循环副作用详解](./loop_effects_deep_dive.md) - Loop Effects 对优化的影响
-- [Inline Cache 深度解析](./inline_cache_deep_dive.md) - IC 状态机制和 Maglev/TurboFan 内联对比
-- [异常处理器映射](./exception_handler_mapping.md) - Handler Table 与 Maglev IR Block 的对应关系
-- [SetPendingMessage 深度解析](./pending_message_deep_dive.md) - 异常状态管理和 the_hole_value 机制
-- [Block 分割规则详解](./block_splitting_rules.md) - Maglev IR Block 的创建规则和控制流分割机制
+- [ScopeInfo 深度解析](../runtime/scope_info_deep_dive.md) - 作用域信息详解
+- [栈帧布局详解](../runtime/stack_frame_layout.md) - V8 栈帧结构和槽位编号
+- [Live Range 和寄存器分配](../compiler/live_range_and_register_allocation.md) - 值的生命周期与寄存器分配
+- [FunctionEntryStackCheck 详解](../runtime/function_entry_stack_check.md) - 栈溢出检查和活跃变量恢复
+- [节点 ID 和值追踪系统](../compiler/node_id_and_value_tracking.md) - 节点编号和值来源追踪
+- [FeedbackVector 和反馈槽位详解](../optimization/feedback_vector_and_slots.md) - 运行时类型反馈和 Maglev 优化
+- [Phi 节点详解](../compiler/phi_node_deep_dive.md) - SSA 形式中的值合并机制
+- [中断预算详解](../runtime/interrupt_budget_deep_dive.md) - 循环中断检查和预算减少机制
+- [循环副作用详解](../compiler/loop_effects_deep_dive.md) - Loop Effects 对优化的影响
+- [Inline Cache 深度解析](../optimization/inline_cache_deep_dive.md) - IC 状态机制和 Maglev/TurboFan 内联对比
+- [异常处理器映射](../runtime/exception_handler_mapping.md) - Handler Table 与 Maglev IR Block 的对应关系
+- [SetPendingMessage 深度解析](../runtime/pending_message_deep_dive.md) - 异常状态管理和 the_hole_value 机制
+- [Block 分割规则详解](../compiler/block_splitting_rules.md) - Maglev IR Block 的创建规则和控制流分割机制
 
 ### V8 官方资源
 
@@ -2271,7 +2269,7 @@ out/x64.debug/d8 --allow-natives-syntax --print-bytecode --print-maglev-graph sc
 1. **从简单用例开始**：先理解 loop、if-else，再看 try-catch
 2. **对比字节码和 IR**：理解转换规则
 3. **追踪值流**：使用节点 ID 追踪值的来源和去向
-4. **关注 Block 边界**：理解控制流如何分割，详见 [Block 分割规则详解](./block_splitting_rules.md)
+4. **关注 Block 边界**：理解控制流如何分割，详见 [Block 分割规则详解](../compiler/block_splitting_rules.md)
 5. **查看反馈信息**：FeedbackVector 影响优化决策
 
 ### 符号说明
